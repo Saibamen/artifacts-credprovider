@@ -27,9 +27,25 @@
 .PARAMETER RuntimeIdentifier
     Installs the self-contained Credential Provider for the specified Runtime Identifier.
 
+.PARAMETER SkipCertificateCheck
+    Skips SSL certificate validation when downloading files from GitHub.
+
+    WARNING: This option should ONLY be used in development and build environments where certificate
+    validation fails due to:
+    - Corporate proxies that intercept SSL traffic
+    - Docker containers with incomplete certificate chains
+    - Build agents behind firewalls
+
+    This is SAFE for build purposes when fetching packages from password-protected private NuGet feeds,
+    as the feed authentication itself provides security. However, this is NOT RECOMMENDED for production
+    runtime environments.
+
+    Default: $false (certificate validation is enabled by default)
+
 .EXAMPLE
     .\installcredprovider.ps1 -InstallNet8
     .\installcredprovider.ps1 -Version "1.0.1" -Force
+    .\installcredprovider.ps1 -SkipCertificateCheck
 #>
 
 [CmdletBinding(HelpUri = "https://github.com/microsoft/artifacts-credprovider/blob/master/README.md#setup")]
@@ -40,7 +56,8 @@ param(
     [string]$Version,
     [switch]$InstallNet6 = $true,
     [switch]$InstallNet8,
-    [string]$RuntimeIdentifier
+    [string]$RuntimeIdentifier,
+    [switch]$SkipCertificateCheck = $false
 )
 
 $script:ErrorActionPreference = 'Stop'
@@ -50,11 +67,17 @@ if ([Net.ServicePointManager]::SecurityProtocol.ToString().Split(',').Trim() -no
     [Net.ServicePointManager]::SecurityProtocol += [Net.SecurityProtocolType]::Tls12
 }
 
+# Skip certificate validation if requested (for environments with certificate chain issues)
+# This is useful in Docker containers, behind corporate proxies, or in build environments
+if ($SkipCertificateCheck) {
+    Write-Warning "Certificate validation is disabled. This should only be used in development/build environments."
+}
+
 if ($Version.StartsWith("0.") -and $InstallNet6 -eq $True) {
     Write-Error "You cannot install the .Net 6 version with versions lower than 1.0.0"
     return
 }
-if (($Version.StartsWith("0.") -or $Version.StartsWith("1.0") -or $Version.StartsWith("1.1") -or $Version.StartsWith("1.2")) -and 
+if (($Version.StartsWith("0.") -or $Version.StartsWith("1.0") -or $Version.StartsWith("1.1") -or $Version.StartsWith("1.2")) -and
     ($InstallNet8 -eq $True -or $AddNetfx48 -eq $True)) {
     Write-Error "You cannot install the .Net 8 or NetFX 4.8.1 version or with versions lower than 1.3.0"
     return
@@ -119,7 +142,11 @@ $versionError = "Unable to find the release version $Version from $releaseUrlBas
 $releaseId = "latest"
 if (![string]::IsNullOrEmpty($Version)) {
     try {
-        $releases = Invoke-WebRequest -UseBasicParsing $releaseUrlBase
+        if ($SkipCertificateCheck) {
+            $releases = Invoke-WebRequest -UseBasicParsing -SkipCertificateCheck $releaseUrlBase
+        } else {
+            $releases = Invoke-WebRequest -UseBasicParsing $releaseUrlBase
+        }
         $releaseJson = $releases | ConvertFrom-Json
         $correctReleaseVersion = $releaseJson | ? { $_.name -eq $Version }
         $releaseId = $correctReleaseVersion.id
@@ -170,7 +197,11 @@ function InstallZip {
 
     try {
         Write-Host "Fetching release $releaseUrl"
-        $release = Invoke-WebRequest -UseBasicParsing $releaseUrl
+        if ($SkipCertificateCheck) {
+            $release = Invoke-WebRequest -UseBasicParsing -SkipCertificateCheck $releaseUrl
+        } else {
+            $release = Invoke-WebRequest -UseBasicParsing $releaseUrl
+        }
         if (!$release) {
             throw ("Unable to make Web Request to $releaseUrl")
         }
@@ -208,8 +239,13 @@ function InstallZip {
     }
     catch {
         $errorMessage = "Unable to download $packageSourceUrl to the location $pluginZip. `n$_"
-        if ($_.Exception.InnerException) {
-            $errorMessage += "`nInner Exception: $($_.Exception.InnerException.Message)"
+        # Print all inner exceptions
+        $innerException = $_.Exception.InnerException
+        $innerCount = 1
+        while ($innerException) {
+            $errorMessage += "`nInner Exception $innerCount`: $($innerException.Message)"
+            $innerException = $innerException.InnerException
+            $innerCount++
         }
         Write-Error $errorMessage
     }
